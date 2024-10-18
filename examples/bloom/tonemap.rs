@@ -13,8 +13,7 @@ use vulkano::{
             viewport::ViewportState,
             GraphicsPipelineCreateInfo,
         },
-        DynamicState, GraphicsPipeline, PipelineBindPoint, PipelineLayout,
-        PipelineShaderStageCreateInfo,
+        DynamicState, GraphicsPipeline, Pipeline, PipelineShaderStageCreateInfo,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
     swapchain::Swapchain,
@@ -35,10 +34,11 @@ pub struct TonemapTask {
 impl TonemapTask {
     pub fn new(
         app: &App,
-        pipeline_layout: &Arc<PipelineLayout>,
         swapchain_id: Id<Swapchain>,
         virtual_swapchain_id: Id<Swapchain>,
     ) -> Self {
+        let bcx = app.resources.bindless_context().unwrap();
+
         let swapchain_state = app.resources.swapchain(swapchain_id).unwrap();
         let swapchain_format = swapchain_state.swapchain().image_format();
 
@@ -72,6 +72,7 @@ impl TonemapTask {
                 PipelineShaderStageCreateInfo::new(vs),
                 PipelineShaderStageCreateInfo::new(fs),
             ];
+            let layout = bcx.pipeline_layout_from_stages(&stages).unwrap();
             let subpass = Subpass::from(render_pass.clone(), 0).unwrap();
 
             GraphicsPipeline::new(
@@ -90,7 +91,7 @@ impl TonemapTask {
                     )),
                     dynamic_state: [DynamicState::Viewport].into_iter().collect(),
                     subpass: Some(subpass.into()),
-                    ..GraphicsPipelineCreateInfo::layout(pipeline_layout.clone())
+                    ..GraphicsPipelineCreateInfo::layout(layout)
                 },
             )
             .unwrap()
@@ -120,14 +121,6 @@ impl Task for TonemapTask {
         tcx: &mut TaskContext<'_>,
         rcx: &Self::World,
     ) -> TaskResult {
-        cbf.as_raw().bind_descriptor_sets(
-            PipelineBindPoint::Graphics,
-            &rcx.pipeline_layout,
-            0,
-            &[&rcx.descriptor_set],
-            &[],
-        )?;
-
         let swapchain_state = tcx.swapchain(self.swapchain_id)?;
         let image_index = swapchain_state.current_image_index().unwrap();
 
@@ -141,9 +134,13 @@ impl Task for TonemapTask {
         cbf.set_viewport(0, slice::from_ref(&rcx.viewport))?;
         cbf.bind_pipeline_graphics(&self.pipeline)?;
         cbf.push_constants(
-            &rcx.pipeline_layout,
+            self.pipeline.layout(),
             0,
-            &fs::PushConstants { exposure: EXPOSURE },
+            &fs::PushConstants {
+                sampler_id: rcx.bloom_sampler_id,
+                texture_id: rcx.bloom_texture_id,
+                exposure: EXPOSURE,
+            },
         )?;
 
         unsafe { cbf.draw(3, 1, 0, 0) }?;

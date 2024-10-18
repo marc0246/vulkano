@@ -19,7 +19,7 @@ use vulkano::{
             viewport::ViewportState,
             GraphicsPipelineCreateInfo,
         },
-        DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo,
+        DynamicState, GraphicsPipeline, PipelineShaderStageCreateInfo,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
 };
@@ -37,11 +37,9 @@ pub struct SceneTask {
 }
 
 impl SceneTask {
-    pub fn new(
-        app: &App,
-        pipeline_layout: &Arc<PipelineLayout>,
-        bloom_image_id: Id<Image>,
-    ) -> Self {
+    pub fn new(app: &App, bloom_image_id: Id<Image>) -> Self {
+        let bcx = app.resources.bindless_context().unwrap();
+
         let render_pass = vulkano::single_pass_renderpass!(
             app.device.clone(),
             attachments: {
@@ -73,6 +71,7 @@ impl SceneTask {
                 PipelineShaderStageCreateInfo::new(vs),
                 PipelineShaderStageCreateInfo::new(fs),
             ];
+            let layout = bcx.pipeline_layout_from_stages(&stages).unwrap();
             let subpass = Subpass::from(render_pass.clone(), 0).unwrap();
 
             GraphicsPipeline::new(
@@ -91,7 +90,7 @@ impl SceneTask {
                     )),
                     dynamic_state: [DynamicState::Viewport].into_iter().collect(),
                     subpass: Some(subpass.into()),
-                    ..GraphicsPipelineCreateInfo::layout(pipeline_layout.clone())
+                    ..GraphicsPipelineCreateInfo::layout(layout)
                 },
             )
             .unwrap()

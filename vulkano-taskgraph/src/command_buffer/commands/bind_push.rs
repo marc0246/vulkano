@@ -1,5 +1,6 @@
 use crate::{
     command_buffer::{RecordingCommandBuffer, Result},
+    descriptor_set::GLOBAL_SET,
     Id,
 };
 use ash::vk;
@@ -9,7 +10,7 @@ use vulkano::{
     self,
     buffer::{Buffer, BufferContents, IndexType},
     device::DeviceOwned,
-    pipeline::{ComputePipeline, GraphicsPipeline, PipelineLayout},
+    pipeline::{ComputePipeline, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout},
     DeviceSize, Version, VulkanObject,
 };
 
@@ -84,6 +85,14 @@ impl RecordingCommandBuffer<'_> {
             )
         };
 
+        let invalidate_from = self
+            .state
+            .invalidate_descriptor_sets(PipelineBindPoint::Compute, pipeline.layout());
+
+        if invalidate_from == Some(GLOBAL_SET) {
+            self.bind_global_set(PipelineBindPoint::Compute, pipeline.layout());
+        }
+
         self.death_row.push(pipeline.clone());
 
         self
@@ -109,6 +118,14 @@ impl RecordingCommandBuffer<'_> {
                 pipeline.handle(),
             )
         };
+
+        let invalidate_from = self
+            .state
+            .invalidate_descriptor_sets(PipelineBindPoint::Graphics, pipeline.layout());
+
+        if invalidate_from == Some(GLOBAL_SET) {
+            self.bind_global_set(PipelineBindPoint::Graphics, pipeline.layout());
+        }
 
         self.death_row.push(pipeline.clone());
 

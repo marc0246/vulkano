@@ -2,18 +2,9 @@
 
 use bloom::BloomTask;
 use scene::SceneTask;
-use std::{cmp, error::Error, sync::Arc};
+use std::{array, cmp, error::Error, sync::Arc};
 use tonemap::TonemapTask;
 use vulkano::{
-    descriptor_set::{
-        allocator::StandardDescriptorSetAllocator,
-        layout::{
-            DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo,
-            DescriptorType,
-        },
-        sys::RawDescriptorSet,
-        DescriptorImageViewInfo, WriteDescriptorSet,
-    },
     device::{
         physical::PhysicalDeviceType, Device, DeviceCreateInfo, DeviceExtensions, DeviceOwned,
         Queue, QueueCreateInfo, QueueFlags,
@@ -21,25 +12,21 @@ use vulkano::{
     format::{Format, NumericFormat},
     image::{
         max_mip_levels,
-        sampler::{Filter, Sampler, SamplerCreateInfo, SamplerMipmapMode, LOD_CLAMP_NONE},
-        view::{ImageView, ImageViewCreateInfo},
+        sampler::{Filter, SamplerCreateInfo, SamplerMipmapMode, LOD_CLAMP_NONE},
+        view::ImageViewCreateInfo,
         Image, ImageAspects, ImageCreateFlags, ImageCreateInfo, ImageLayout, ImageSubresourceRange,
         ImageType, ImageUsage,
     },
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
     memory::allocator::AllocationCreateInfo,
-    pipeline::{
-        graphics::viewport::Viewport,
-        layout::{PipelineLayoutCreateInfo, PushConstantRange},
-        PipelineLayout,
-    },
-    shader::ShaderStages,
+    pipeline::graphics::viewport::Viewport,
     swapchain::{ColorSpace, Surface, Swapchain, SwapchainCreateInfo},
     Validated, Version, VulkanError, VulkanLibrary,
 };
 use vulkano_taskgraph::{
+    descriptor_set::{BindlessContext, SampledImageId, SamplerId, StorageImageId},
     graph::{CompileInfo, ExecutableTaskGraph, ExecuteError, NodeId, TaskGraph},
-    resource::{AccessType, Flight, ImageLayoutType, Resources},
+    resource::{AccessType, Flight, ImageLayoutType, Resources, ResourcesCreateInfo},
     resource_map, Id, QueueFamilyType,
 };
 use winit::{
@@ -77,11 +64,10 @@ pub struct RenderContext {
     swapchain_id: Id<Swapchain>,
     bloom_image_id: Id<Image>,
     viewport: Viewport,
-    pipeline_layout: Arc<PipelineLayout>,
     recreate_swapchain: bool,
-    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
-    sampler: Arc<Sampler>,
-    descriptor_set: Arc<RawDescriptorSet>,
+    bloom_sampler_id: SamplerId,
+    bloom_texture_id: SampledImageId,
+    bloom_mip_chain_ids: [StorageImageId; MAX_BLOOM_MIP_LEVELS as usize],
     task_graph: ExecutableTaskGraph<Self>,
     scene_node_id: NodeId,
     tonemap_node_id: NodeId,
@@ -105,15 +91,19 @@ impl App {
 
         let mut device_extensions = DeviceExtensions {
             khr_swapchain: true,
-            ..DeviceExtensions::empty()
+            ..BindlessContext::required_extensions(&instance)
         };
+        let device_features = BindlessContext::required_features(&instance);
         let (physical_device, queue_family_index) = instance
             .enumerate_physical_devices()
             .unwrap()
             .filter(|p| {
                 p.api_version() >= Version::V1_1 || p.supported_extensions().khr_maintenance2
             })
-            .filter(|p| p.supported_extensions().contains(&device_extensions))
+            .filter(|p| {
+                p.supported_extensions().contains(&device_extensions)
+                    && p.supported_features().contains(&device_features)
+            })
             .filter_map(|p| {
                 p.queue_family_properties()
                     .iter()
@@ -155,6 +145,7 @@ impl App {
             physical_device,
             DeviceCreateInfo {
                 enabled_extensions: device_extensions,
+                enabled_features: device_features,
                 queue_create_infos: vec![QueueCreateInfo {
                     queue_family_index,
                     ..Default::default()
@@ -166,7 +157,14 @@ impl App {
 
         let queue = queues.next().unwrap();
 
-        let resources = Resources::new(&device, &Default::default());
+        let resources = Resources::new(
+            &device,
+            &ResourcesCreateInfo {
+                bindless_context: Some(&Default::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let flight_id = resources.create_flight(MAX_FRAMES_IN_FLIGHT).unwrap();
 
@@ -183,6 +181,8 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let bcx = self.resources.bindless_context().unwrap();
+
         let window = Arc::new(
             event_loop
                 .create_window(Window::default_attributes())
@@ -236,82 +236,19 @@ impl ApplicationHandler for App {
             depth_range: 0.0..=1.0,
         };
 
-        let pipeline_layout = PipelineLayout::new(
-            self.device.clone(),
-            PipelineLayoutCreateInfo {
-                set_layouts: vec![DescriptorSetLayout::new(
-                    self.device.clone(),
-                    DescriptorSetLayoutCreateInfo {
-                        bindings: [
-                            (
-                                0,
-                                DescriptorSetLayoutBinding {
-                                    stages: ShaderStages::FRAGMENT | ShaderStages::COMPUTE,
-                                    ..DescriptorSetLayoutBinding::descriptor_type(
-                                        DescriptorType::Sampler,
-                                    )
-                                },
-                            ),
-                            (
-                                1,
-                                DescriptorSetLayoutBinding {
-                                    stages: ShaderStages::FRAGMENT | ShaderStages::COMPUTE,
-                                    ..DescriptorSetLayoutBinding::descriptor_type(
-                                        DescriptorType::SampledImage,
-                                    )
-                                },
-                            ),
-                            (
-                                2,
-                                DescriptorSetLayoutBinding {
-                                    stages: ShaderStages::COMPUTE,
-                                    descriptor_count: MAX_BLOOM_MIP_LEVELS,
-                                    ..DescriptorSetLayoutBinding::descriptor_type(
-                                        DescriptorType::StorageImage,
-                                    )
-                                },
-                            ),
-                        ]
-                        .into_iter()
-                        .collect(),
-                        ..Default::default()
-                    },
-                )
-                .unwrap()],
-                push_constant_ranges: vec![PushConstantRange {
-                    stages: ShaderStages::FRAGMENT | ShaderStages::COMPUTE,
-                    offset: 0,
-                    size: 12,
-                }],
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
-            self.device.clone(),
-            Default::default(),
-        ));
-
-        let sampler = Sampler::new(
-            self.device.clone(),
-            SamplerCreateInfo {
+        let bloom_sampler_id = bcx
+            .global_set()
+            .create_sampler(SamplerCreateInfo {
                 mag_filter: Filter::Linear,
                 min_filter: Filter::Linear,
                 mipmap_mode: SamplerMipmapMode::Nearest,
                 lod: 0.0..=LOD_CLAMP_NONE,
                 ..Default::default()
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
-        let (bloom_image_id, descriptor_set) = window_size_dependent_setup(
-            &self.resources,
-            swapchain_id,
-            &pipeline_layout,
-            &sampler,
-            &descriptor_set_allocator,
-        );
+        let (bloom_image_id, bloom_texture_id, bloom_mip_chain_ids) =
+            window_size_dependent_setup(&self.resources, swapchain_id);
 
         let mut task_graph = TaskGraph::new(&self.resources, 3, 2);
 
@@ -322,7 +259,7 @@ impl ApplicationHandler for App {
             .create_task_node(
                 "Scene",
                 QueueFamilyType::Graphics,
-                SceneTask::new(self, &pipeline_layout, bloom_image_id),
+                SceneTask::new(self, bloom_image_id),
             )
             .image_access(
                 virtual_bloom_image_id,
@@ -334,7 +271,7 @@ impl ApplicationHandler for App {
             .create_task_node(
                 "Bloom",
                 QueueFamilyType::Compute,
-                BloomTask::new(self, &pipeline_layout, virtual_bloom_image_id),
+                BloomTask::new(self, virtual_bloom_image_id),
             )
             .image_access(
                 virtual_bloom_image_id,
@@ -351,7 +288,7 @@ impl ApplicationHandler for App {
             .create_task_node(
                 "Tonemap",
                 QueueFamilyType::Graphics,
-                TonemapTask::new(self, &pipeline_layout, swapchain_id, virtual_swapchain_id),
+                TonemapTask::new(self, swapchain_id, virtual_swapchain_id),
             )
             .image_access(
                 virtual_swapchain_id.current_image_id(),
@@ -383,11 +320,10 @@ impl ApplicationHandler for App {
             swapchain_id,
             bloom_image_id,
             viewport,
-            pipeline_layout,
             recreate_swapchain: false,
-            sampler,
-            descriptor_set_allocator,
-            descriptor_set,
+            bloom_sampler_id,
+            bloom_texture_id,
+            bloom_mip_chain_ids,
             task_graph,
             scene_node_id,
             tonemap_node_id,
@@ -433,13 +369,11 @@ impl ApplicationHandler for App {
 
                     unsafe { self.resources.remove_image(rcx.bloom_image_id) }.unwrap();
 
-                    (rcx.bloom_image_id, rcx.descriptor_set) = window_size_dependent_setup(
-                        &self.resources,
-                        rcx.swapchain_id,
-                        &rcx.pipeline_layout,
-                        &rcx.sampler,
-                        &rcx.descriptor_set_allocator,
-                    );
+                    (
+                        rcx.bloom_image_id,
+                        rcx.bloom_texture_id,
+                        rcx.bloom_mip_chain_ids,
+                    ) = window_size_dependent_setup(&self.resources, rcx.swapchain_id);
 
                     rcx.task_graph
                         .task_node_mut(rcx.scene_node_id)
@@ -498,11 +432,13 @@ impl ApplicationHandler for App {
 fn window_size_dependent_setup(
     resources: &Resources,
     swapchain_id: Id<Swapchain>,
-    pipeline_layout: &Arc<PipelineLayout>,
-    sampler: &Arc<Sampler>,
-    descriptor_set_allocator: &Arc<StandardDescriptorSetAllocator>,
-) -> (Id<Image>, Arc<RawDescriptorSet>) {
+) -> (
+    Id<Image>,
+    SampledImageId,
+    [StorageImageId; MAX_BLOOM_MIP_LEVELS as usize],
+) {
     let device = resources.device();
+    let bcx = resources.bindless_context().unwrap();
     let swapchain_state = resources.swapchain(swapchain_id).unwrap();
     let images = swapchain_state.images();
     let extent = images[0].extent();
@@ -541,61 +477,40 @@ fn window_size_dependent_setup(
     let bloom_image_state = resources.image(bloom_image_id).unwrap();
     let bloom_image = bloom_image_state.image();
 
-    let bloom_texture_view = ImageView::new(
-        bloom_image.clone(),
-        ImageViewCreateInfo {
-            format: Format::E5B9G9R9_UFLOAT_PACK32,
-            subresource_range: bloom_image.subresource_range(),
-            usage: ImageUsage::SAMPLED,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-
-    let bloom_mip_chain_views = (0..MAX_BLOOM_MIP_LEVELS).map(|mip_level| {
-        let mip_level = cmp::min(mip_level, max_mip_levels(extent) - 1);
-
-        ImageView::new(
-            bloom_image.clone(),
+    let bloom_texture_id = bcx
+        .global_set()
+        .create_sampled_image(
+            bloom_image_id,
             ImageViewCreateInfo {
-                format: Format::R32_UINT,
-                subresource_range: ImageSubresourceRange {
-                    aspects: ImageAspects::COLOR,
-                    mip_levels: mip_level..mip_level + 1,
-                    array_layers: 0..1,
-                },
-                usage: ImageUsage::STORAGE,
+                format: Format::E5B9G9R9_UFLOAT_PACK32,
+                subresource_range: bloom_image.subresource_range(),
+                usage: ImageUsage::SAMPLED,
                 ..Default::default()
             },
+            ImageLayout::General,
         )
-        .unwrap()
+        .unwrap();
+
+    let bloom_mip_chain_ids = array::from_fn(|mip_level| {
+        let mip_level = cmp::min(mip_level as u32, max_mip_levels(extent) - 1);
+
+        bcx.global_set()
+            .create_storage_image(
+                bloom_image_id,
+                ImageViewCreateInfo {
+                    format: Format::R32_UINT,
+                    subresource_range: ImageSubresourceRange {
+                        aspects: ImageAspects::COLOR,
+                        mip_levels: mip_level..mip_level + 1,
+                        array_layers: 0..1,
+                    },
+                    usage: ImageUsage::STORAGE,
+                    ..Default::default()
+                },
+                ImageLayout::General,
+            )
+            .unwrap()
     });
 
-    let descriptor_set = RawDescriptorSet::new(
-        descriptor_set_allocator.clone(),
-        &pipeline_layout.set_layouts()[0],
-        0,
-    )
-    .unwrap();
-    let writes = &[
-        WriteDescriptorSet::sampler(0, sampler.clone()),
-        WriteDescriptorSet::image_view_with_layout(
-            1,
-            DescriptorImageViewInfo {
-                image_view: bloom_texture_view,
-                image_layout: ImageLayout::General,
-            },
-        ),
-        WriteDescriptorSet::image_view_with_layout_array(
-            2,
-            0,
-            bloom_mip_chain_views.map(|image_view| DescriptorImageViewInfo {
-                image_view,
-                image_layout: ImageLayout::General,
-            }),
-        ),
-    ];
-    unsafe { descriptor_set.update(writes, &[]) }.unwrap();
-
-    (bloom_image_id, Arc::new(descriptor_set))
+    (bloom_image_id, bloom_texture_id, bloom_mip_chain_ids)
 }

@@ -1,9 +1,9 @@
 use crate::{App, RenderContext};
-use std::sync::Arc;
+use std::{slice, sync::Arc};
 use vulkano::{
     image::{mip_level_extent, Image},
     pipeline::{
-        compute::ComputePipelineCreateInfo, ComputePipeline, PipelineBindPoint, PipelineLayout,
+        compute::ComputePipelineCreateInfo, ComputePipeline, Pipeline,
         PipelineShaderStageCreateInfo,
     },
     sync::{AccessFlags, PipelineStages},
@@ -24,22 +24,23 @@ pub struct BloomTask {
 }
 
 impl BloomTask {
-    pub fn new(
-        app: &App,
-        pipeline_layout: &Arc<PipelineLayout>,
-        virtual_bloom_image_id: Id<Image>,
-    ) -> Self {
+    pub fn new(app: &App, virtual_bloom_image_id: Id<Image>) -> Self {
+        let bcx = app.resources.bindless_context().unwrap();
+
         let downsample_pipeline = {
             let cs = downsample::load(app.device.clone())
                 .unwrap()
                 .entry_point("main")
                 .unwrap();
             let stage = PipelineShaderStageCreateInfo::new(cs);
+            let layout = bcx
+                .pipeline_layout_from_stages(slice::from_ref(&stage))
+                .unwrap();
 
             ComputePipeline::new(
                 app.device.clone(),
                 None,
-                ComputePipelineCreateInfo::stage_layout(stage, pipeline_layout.clone()),
+                ComputePipelineCreateInfo::stage_layout(stage, layout),
             )
             .unwrap()
         };
@@ -50,11 +51,14 @@ impl BloomTask {
                 .entry_point("main")
                 .unwrap();
             let stage = PipelineShaderStageCreateInfo::new(cs);
+            let layout = bcx
+                .pipeline_layout_from_stages(slice::from_ref(&stage))
+                .unwrap();
 
             ComputePipeline::new(
                 app.device.clone(),
                 None,
-                ComputePipelineCreateInfo::stage_layout(stage, pipeline_layout.clone()),
+                ComputePipelineCreateInfo::stage_layout(stage, layout),
             )
             .unwrap()
         };
@@ -76,14 +80,6 @@ impl Task for BloomTask {
         tcx: &mut TaskContext<'_>,
         rcx: &Self::World,
     ) -> TaskResult {
-        cbf.as_raw().bind_descriptor_sets(
-            PipelineBindPoint::Compute,
-            &rcx.pipeline_layout,
-            0,
-            &[&rcx.descriptor_set],
-            &[],
-        )?;
-
         let bloom_image = tcx.image(self.bloom_image_id)?.image();
 
         let dependency_info = DependencyInfo {
@@ -105,9 +101,12 @@ impl Task for BloomTask {
             let group_counts = dst_extent.map(|c| (c + 7) / 8);
 
             cbf.push_constants(
-                &rcx.pipeline_layout,
+                self.downsample_pipeline.layout(),
                 0,
                 &downsample::PushConstants {
+                    sampler_id: rcx.bloom_sampler_id,
+                    texture_id: rcx.bloom_texture_id,
+                    dst_mip_image_id: rcx.bloom_mip_chain_ids[dst_mip_level as usize],
                     dst_mip_level,
                     threshold: THRESHOLD,
                     knee: KNEE,
@@ -126,9 +125,12 @@ impl Task for BloomTask {
             let group_counts = dst_extent.map(|c| (c + 7) / 8);
 
             cbf.push_constants(
-                &rcx.pipeline_layout,
+                self.upsample_pipeline.layout(),
                 0,
                 &upsample::PushConstants {
+                    sampler_id: rcx.bloom_sampler_id,
+                    texture_id: rcx.bloom_texture_id,
+                    dst_mip_image_id: rcx.bloom_mip_chain_ids[dst_mip_level as usize],
                     dst_mip_level,
                     intensity: INTENSITY,
                 },
@@ -142,7 +144,6 @@ impl Task for BloomTask {
         }
 
         cbf.destroy_object(bloom_image.clone());
-        cbf.destroy_object(rcx.descriptor_set.clone());
 
         Ok(())
     }

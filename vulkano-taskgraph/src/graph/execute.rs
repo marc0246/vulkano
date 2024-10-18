@@ -2,7 +2,7 @@ use super::{
     BarrierIndex, ExecutableTaskGraph, Instruction, NodeIndex, ResourceAccess, SemaphoreIndex,
 };
 use crate::{
-    command_buffer::RecordingCommandBuffer,
+    command_buffer::{CommandBufferState, RecordingCommandBuffer},
     resource::{
         BufferAccess, BufferState, DeathRow, ImageAccess, ImageState, Resources, SwapchainState,
     },
@@ -152,9 +152,11 @@ impl<W: ?Sized + 'static> ExecutableTaskGraph<W> {
         // SAFETY: We checked that `resource_map` maps the virtual IDs exhaustively.
         unsafe { self.update_resource_state(&resource_map, &self.last_accesses) };
 
-        resource_map
-            .physical_resources
-            .try_advance_global_and_collect(&resource_map.guard);
+        if resource_map.guard.try_advance_global() {
+            resource_map
+                .physical_resources
+                .try_collect(&resource_map.guard);
+        }
 
         res
     }
@@ -620,6 +622,7 @@ struct ExecuteState2<'a, W: ?Sized + 'static> {
     per_submits: SmallVec<[PerSubmitInfo2; 4]>,
     current_per_submit: PerSubmitInfo2,
     current_command_buffer: Option<raw::RecordingCommandBuffer>,
+    command_buffer_state: CommandBufferState,
     command_buffers: Vec<Arc<raw::CommandBuffer>>,
     current_buffer_barriers: Vec<vk::BufferMemoryBarrier2<'static>>,
     current_image_barriers: Vec<vk::ImageMemoryBarrier2<'static>>,
@@ -666,6 +669,7 @@ impl<'a, W: ?Sized + 'static> ExecuteState2<'a, W> {
             per_submits: SmallVec::new(),
             current_per_submit: PerSubmitInfo2::default(),
             current_command_buffer: None,
+            command_buffer_state: CommandBufferState::default(),
             command_buffers: Vec::new(),
             current_buffer_barriers: Vec::new(),
             current_image_barriers: Vec::new(),
@@ -808,20 +812,21 @@ impl<'a, W: ?Sized + 'static> ExecuteState2<'a, W> {
 
         let task_node = unsafe { self.executable.graph.nodes.task_node_unchecked(node_index) };
         let task = &task_node.task;
-        let mut current_command_buffer = unsafe {
+        let mut cbf = unsafe {
             RecordingCommandBuffer::new(
                 current_command_buffer!(self),
+                &mut self.command_buffer_state,
                 self.resource_map,
                 self.death_row,
             )
         };
-        let mut context = TaskContext {
+        let mut tcx = TaskContext {
             resource_map: self.resource_map,
             current_frame_index: self.current_frame_index,
             command_buffers: &mut self.command_buffers,
         };
 
-        unsafe { task.execute(&mut current_command_buffer, &mut context, self.world) }
+        unsafe { task.execute(&mut cbf, &mut tcx, self.world) }
             .map_err(|error| ExecuteError::Task { node_index, error })?;
 
         if !self.command_buffers.is_empty() {
@@ -1025,6 +1030,7 @@ impl<'a, W: ?Sized + 'static> ExecuteState2<'a, W> {
             .command_buffer_infos
             .push(vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer.handle()));
         self.death_row.push(Arc::new(command_buffer));
+        self.command_buffer_state.reset();
 
         Ok(())
     }
@@ -1043,6 +1049,7 @@ struct ExecuteState<'a, W: ?Sized + 'static> {
     per_submits: SmallVec<[PerSubmitInfo; 4]>,
     current_per_submit: PerSubmitInfo,
     current_command_buffer: Option<raw::RecordingCommandBuffer>,
+    command_buffer_state: CommandBufferState,
     command_buffers: Vec<Arc<raw::CommandBuffer>>,
     current_buffer_barriers: Vec<vk::BufferMemoryBarrier<'static>>,
     current_image_barriers: Vec<vk::ImageMemoryBarrier<'static>>,
@@ -1084,6 +1091,7 @@ impl<'a, W: ?Sized + 'static> ExecuteState<'a, W> {
             queue_submit,
             per_submits: SmallVec::new(),
             current_per_submit: PerSubmitInfo::default(),
+            command_buffer_state: CommandBufferState::default(),
             current_command_buffer: None,
             command_buffers: Vec::new(),
             current_buffer_barriers: Vec::new(),
@@ -1233,20 +1241,21 @@ impl<'a, W: ?Sized + 'static> ExecuteState<'a, W> {
 
         let task_node = unsafe { self.executable.graph.nodes.task_node_unchecked(node_index) };
         let task = &task_node.task;
-        let mut current_command_buffer = unsafe {
+        let mut cbf = unsafe {
             RecordingCommandBuffer::new(
                 current_command_buffer!(self),
+                &mut self.command_buffer_state,
                 self.resource_map,
                 self.death_row,
             )
         };
-        let mut context = TaskContext {
+        let mut tcx = TaskContext {
             resource_map: self.resource_map,
             current_frame_index: self.current_frame_index,
             command_buffers: &mut self.command_buffers,
         };
 
-        unsafe { task.execute(&mut current_command_buffer, &mut context, self.world) }
+        unsafe { task.execute(&mut cbf, &mut tcx, self.world) }
             .map_err(|error| ExecuteError::Task { node_index, error })?;
 
         if !self.command_buffers.is_empty() {
@@ -1464,6 +1473,7 @@ impl<'a, W: ?Sized + 'static> ExecuteState<'a, W> {
             .command_buffers
             .push(command_buffer.handle());
         self.death_row.push(Arc::new(command_buffer));
+        self.command_buffer_state.reset();
 
         Ok(())
     }

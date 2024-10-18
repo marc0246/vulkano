@@ -16,6 +16,7 @@ categories = { workspace = true }
 [dependencies]
 ahash = { workspace = true }
 ash = { workspace = true }
+bytemuck = { workspace = true }
 concurrent-slotmap = { workspace = true }
 parking_lot = { workspace = true }
 smallvec = { workspace = true }
