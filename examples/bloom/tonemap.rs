@@ -130,6 +130,6 @@ mod vs {
 mod fs {
     vulkano_shaders::shader! {
         ty: "fragment",
-        path: "tonemap.glsl",
+        path: "shaders/tonemap.glsl",
     }
 }

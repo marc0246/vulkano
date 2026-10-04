@@ -150,13 +150,13 @@ impl Task for BloomTask {
 mod downsample {
     vulkano_shaders::shader! {
         ty: "compute",
-        path: "downsample.glsl",
+        path: "shaders/downsample.glsl",
     }
 }
 
 mod upsample {
     vulkano_shaders::shader! {
         ty: "compute",
-        path: "upsample.glsl",
+        path: "shaders/upsample.glsl",
     }
 }
