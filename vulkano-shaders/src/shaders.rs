@@ -130,6 +130,11 @@ fn create_vulkano_dir() -> Result<TempDir, String> {
         include_str!("../include/vulkano.glsl"),
     )
     .map_err(|e| format!("failed to write vulkano.glsl: {e}"))?;
+    fs::write(
+        vulkano_dir.0.join("vulkano.slang"),
+        include_str!("../include/vulkano.slang"),
+    )
+    .map_err(|e| format!("failed to write vulkano.slang: {e}"))?;
 
     Ok(vulkano_dir)
 }
