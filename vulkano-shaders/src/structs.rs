@@ -949,8 +949,10 @@ impl TypeStruct {
             return None;
         }
 
+        let name = self.ident.to_string();
+
         if matches!(
-            self.ident.to_string().as_str(),
+            name.as_str(),
             "SamplerId"
                 | "SampledImageId"
                 | "StorageImageId"
@@ -959,8 +961,6 @@ impl TypeStruct {
         ) {
             return Some(self.ident.clone());
         }
-
-        let name = self.ident.to_string();
 
         if matches!(
             name.as_str(),
