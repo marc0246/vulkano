@@ -300,7 +300,7 @@ func nonuniformRaytracingAccelerationStructure(
 #ifdef VKO_INPUT_ATTACHMENT_ENABLED
 #if VKO_INPUT_ATTACHMENT_ENABLED
 
-[vk::binding(VKO_LOCAL_SET, VKO_INPUT_ATTACHMENT_BINDING)]
+[vk::binding(VKO_INPUT_ATTACHMENT_BINDING, VKO_LOCAL_SET)]
 [vk::input_attachment_index(0)]
 let _input_attachments: __DynamicResource[];
 
